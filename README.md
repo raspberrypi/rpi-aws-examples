@@ -4,7 +4,7 @@ This repository contains example code to demontrate connectivity of Raspberry Pi
 
 ## Pi5AWSExample
 
-This is a simply Python program that passes the AWS DEvice Advsior qualification tests
+This is a simply Python program that passes the AWS Device Advisor qualification tests
 
 A Getting Started Guide can be found here
 
