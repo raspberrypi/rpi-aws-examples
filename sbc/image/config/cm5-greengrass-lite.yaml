@@ -1,0 +1,23 @@
+# Compute Module 5 (eMMC), Raspberry Pi OS Trixie (minimal), with a Greengrass Nucleus Lite core.
+# Tested 2026-11-16 on a CM5 on the CM5 IO board, booted from NVMe (wrapped key): image built, booted, enrolled; count and cmd on MQTT, log lines in CloudWatch, and after a reboot. Earlier (2026-11-02, another CM5) also with a file key.
+# Build: see sbc/image/README.md. Pass this repository and your SSH public key:
+#   -- IGconf_awsex_src=<repository> IGconf_ssh_pubkey_user1=<key.pub>
+device:
+  layer: rpi-cm5
+  user1: pi
+  # Desk setup: pi may use sudo without a password (it has none; it logs in with the SSH key).
+  # A product image leaves this out.
+  user1sudo: nopasswd
+
+image:
+  layer: image-rpios
+  boot_part_size: 200%
+  root_part_size: 300%
+  name: rpi-aws-examples-cm5-greengrass-lite
+
+layer:
+  base: trixie-minbase
+  app: rpi-aws-examples-greengrass-lite
+
+ssh:
+  pubkey_only: y

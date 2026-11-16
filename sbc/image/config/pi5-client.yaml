@@ -1,0 +1,23 @@
+# Raspberry Pi 5, Raspberry Pi OS Trixie (minimal), with the hello client.
+# Tested 2026-10-30 on a Pi 5 (file key and wrapped key): image built, booted, enrolled; hello, count and cmd, and after a reboot.
+# Build: see sbc/image/README.md. Pass this repository and your SSH public key:
+#   -- IGconf_awsex_src=<repository> IGconf_ssh_pubkey_user1=<key.pub>
+device:
+  layer: rpi5
+  user1: pi
+  # Desk setup: pi may use sudo without a password (it has none; it logs in with the SSH key).
+  # A product image leaves this out.
+  user1sudo: nopasswd
+
+image:
+  layer: image-rpios
+  boot_part_size: 200%
+  root_part_size: 300%
+  name: rpi-aws-examples-pi5-client
+
+layer:
+  base: trixie-minbase
+  app: rpi-aws-examples-client
+
+ssh:
+  pubkey_only: y

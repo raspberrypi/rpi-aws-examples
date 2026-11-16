@@ -1,0 +1,36 @@
+# METABEGIN
+# X-Env-Layer-Name: rpi-aws-examples-greengrass-classic
+# X-Env-Layer-Category: app
+# X-Env-Layer-Desc: Greengrass Classic (the Java nucleus): a Java runtime and the
+#  nucleus installer in /opt/greengrass/installer, pinned and signature checked
+#  on the build host. Not installed as a core: rpi-aws-gg-setup does that on the
+#  device, with its own certificate.
+# X-Env-Layer-Version: 0.1.0
+# X-Env-Layer-Requires: rpi-aws-examples-base
+#
+# X-Env-VarPrefix: awsexgg
+#
+# X-Env-Var-nucleus_version: 2.18.4
+# X-Env-Var-nucleus_version-Desc: Greengrass nucleus version.
+# X-Env-Var-nucleus_version-Required: n
+# X-Env-Var-nucleus_version-Valid: string
+# X-Env-Var-nucleus_version-Set: y
+# METAEND
+---
+mmdebstrap:
+  packages:
+    - default-jre-headless
+    - python3-venv
+    - unzip
+    - curl
+  customize-hooks:
+    # Downloaded and checked on the build host (jarsigner, from a JDK), never on the device.
+    - |-
+      set -eu
+      command -v jarsigner >/dev/null || { echo "greengrass-classic: the build host needs jarsigner (a JDK)" >&2; exit 1; }
+      tmp=$(mktemp -d)
+      curl -fsSL -o $tmp/nucleus.zip "https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-${IGconf_awsexgg_nucleus_version}.zip"
+      jarsigner -verify $tmp/nucleus.zip | grep -q "jar verified" || { echo "greengrass-classic: signature check failed" >&2; exit 1; }
+      mkdir -p $1/opt/greengrass/installer
+      unzip -q -o $tmp/nucleus.zip -d $1/opt/greengrass/installer
+      rm -rf $tmp

@@ -1,0 +1,106 @@
+#!/bin/bash
+# Make this device's private key on the device, and print a certificate signing request (CSR) for it.
+#
+#   sudo rpi-aws-keygen [--store file|wrapped] [--name NAME]   make the key (if none) and print its CSR
+#   sudo rpi-aws-keygen --install DIR                           install DIR/device.crt and DIR/config.json
+#   sudo rpi-aws-keygen --reset                                 delete the key, certificate and config
+#
+# --store file (the default here; the READMEs use wrapped): the key is a plain file, /etc/rpi-aws-examples/device.key.
+# --store wrapped (the key ladder, as in the READMEs): the key is wrapped under a key the firmware derives from OTP key 1, by
+#   rpi-aws-keyhelper. Needs OTP key 1 programmed; refuses, and never falls back to a file, if it is not.
+# NAME defaults to rpi-ex-<id>: the firmware's machine ID (/proc/device-tree/chosen/rpi-machine-id), or
+#   its 64-bit serial (chosen/rpi-serial64) on older firmware. Running it again prints the CSR for the same key.
+# The CSR is also saved as /etc/rpi-aws-examples/device.csr. Only the CSR leaves the device.
+set -euo pipefail
+
+DIR=/etc/rpi-aws-examples
+HELPER=/usr/local/sbin/rpi-aws-keyhelper
+USER_=rpi-ex
+
+die() { echo "error: $*" >&2; exit 1; }
+usage() { sed -n '2,/^set /p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+store="" name="" install="" reset=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --store) store=$2; shift 2 ;;
+    --name) name=$2; shift 2 ;;
+    --install) install=$2; shift 2 ;;
+    --reset) reset=1; shift ;;
+    -h|--help) usage ;;
+    *) usage 2 >&2 ;;
+  esac
+done
+[ "$(id -u)" -eq 0 ] || die "run with sudo"
+[ -d "$DIR" ] || die "$DIR is missing: run sbc/install.sh first"
+# Root writes here by path, so only root may change the directory: the service user could otherwise plant a
+# link for root to write through. install.sh makes it root:rpi-ex 0750.
+[ "$(stat -c %U "$DIR")" = root ] || die "$DIR must be owned by root: run sbc/install.sh again"
+current=$(cat "$DIR/keystore" 2>/dev/null || true)
+
+if [ "$reset" -eq 1 ]; then
+  rm -f "$DIR"/{device.key,device.csr,device.crt,config.json,keystore}
+  [ -x "$HELPER" ] && "$HELPER" reset
+  echo "Deleted this device's key and certificate. Unregister the thing on your laptop too." >&2
+  exit 0
+fi
+
+# The public key of the device's key, whichever store holds it.
+pubkey() {
+  case "$current" in
+    file) openssl pkey -in "$DIR/device.key" -pubout ;;
+    wrapped) "$HELPER" pubkey ;;
+    *) die "no key yet: run rpi-aws-keygen first" ;;
+  esac
+}
+
+if [ -n "$install" ]; then
+  for f in device.crt config.json; do [ -r "$install/$f" ] || die "$install/$f is missing"; done
+  key_pub=$(pubkey | openssl pkey -pubin -outform DER | sha256sum)
+  crt_pub=$(openssl x509 -in "$install/device.crt" -noout -pubkey | openssl pkey -pubin -outform DER | sha256sum)
+  [ "$key_pub" = "$crt_pub" ] || die "$install/device.crt is not for this device's key"
+  for f in device.crt config.json; do install -m 640 -o root -g "$USER_" "$install/$f" "$DIR/$f"; done
+  [ "$current" = wrapped ] && "$HELPER" unwrap
+  if grep -q '"nucleus"' "$DIR/config.json"; then
+    echo "Installed. Next, for Greengrass: sudo rpi-aws-gg-setup" >&2
+  else
+    echo "Installed. Start the client with: sudo systemctl enable --now rpi-aws-hello" >&2
+  fi
+  exit 0
+fi
+
+store=${store:-${current:-file}}
+case "$store" in file|wrapped) ;; *) die "--store is file or wrapped" ;; esac
+if [ -n "$current" ] && [ "$current" != "$store" ]; then
+  die "this device already has a $current key. To start again: sudo rpi-aws-keygen --reset, and unregister the thing"
+fi
+if [ -z "$name" ]; then
+  # The firmware's machine ID, or its 64-bit serial on firmware too old to have one.
+  id=""
+  for p in rpi-machine-id rpi-serial64; do
+    [ -n "$id" ] || id=$(tr -d '\0[:space:]' 2>/dev/null < "/proc/device-tree/chosen/$p" || true)
+  done
+  [ -n "$id" ] || die "cannot read the board's machine ID or serial: pass --name"
+  name="rpi-ex-$(echo "$id" | tr '[:upper:]' '[:lower:]')"
+fi
+[[ "$name" =~ ^[A-Za-z0-9_:-]{1,128}$ ]] || die "invalid name '$name'"
+
+case "$store" in
+  file)
+    if [ ! -e "$DIR/device.key" ]; then
+      (umask 077; openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$DIR/device.key")
+      chown "root:$USER_" "$DIR/device.key"
+      chmod 640 "$DIR/device.key"
+    fi
+    csr=$(openssl req -new -key "$DIR/device.key" -subj "/CN=$name")
+    ;;
+  wrapped)
+    [ -x "$HELPER" ] || die "$HELPER is missing: run sbc/install.sh"
+    csr=$("$HELPER" csr --cn "$name")
+    "$HELPER" wifi-wrap    # iwd's Wi-Fi profiles too, if there are any (images)
+    ;;
+esac
+echo "$store" > "$DIR/keystore"
+printf '%s\n' "$csr" > "$DIR/device.csr"
+echo "Key: $store store. CSR for CN=$name (also in $DIR/device.csr):" >&2
+printf '%s\n' "$csr"

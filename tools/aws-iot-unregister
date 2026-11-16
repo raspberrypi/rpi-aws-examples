@@ -1,0 +1,55 @@
+#!/bin/bash
+# Remove a device that aws-iot-register created.
+#
+#   aws-iot-unregister rpi-ex-... [--region eu-west-2]
+#
+# For each certificate attached to the thing: detaches its policies and the thing, deactivates it and
+# deletes it. Then deletes the thing, and any rpi-ex- policy that is no longer attached to anything.
+# The device's key and certificate files are not touched: delete them on the device.
+set -euo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+usage() { sed -n '2,/^set /p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit "${1:-0}"; }
+name=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --region) region=$2; shift 2 ;;
+    -h|--help) usage ;;
+    -*) usage 2 >&2 ;;
+    *) name=$1; shift ;;
+  esac
+done
+need
+[ -n "$name" ] || usage 2 >&2
+valid_thing "$name"
+
+if ! aws_ iot describe-thing --thing-name "$name" >/dev/null 2>&1; then
+  say "thing $name: not found, nothing to do"
+  exit 0
+fi
+
+policies=()
+for arn in $(thing_certs "$name"); do
+  id=${arn##*/}
+  for p in $(aws_ iot list-attached-policies --target "$arn" --query 'policies[].policyName' --output text); do
+    aws_ iot detach-policy --policy-name "$p" --target "$arn"
+    policies+=("$p")
+  done
+  aws_ iot detach-thing-principal --thing-name "$name" --principal "$arn"
+  aws_ iot update-certificate --certificate-id "$id" --new-status INACTIVE
+  # Detaching is eventually consistent: deleting can fail for a few seconds afterwards.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    aws_ iot delete-certificate --certificate-id "$id" 2>/dev/null && break
+    [ "$i" -lt 10 ] || die "could not delete certificate $id"
+    sleep 3
+  done
+  say "certificate ${id:0:12}…: deleted"
+done
+
+aws_ iot delete-thing --thing-name "$name"
+say "thing $name: deleted"
+
+for p in $(printf '%s\n' "${policies[@]}" | sort -u); do
+  delete_policy_if_unused "$p"
+done

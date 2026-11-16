@@ -1,0 +1,87 @@
+#!/bin/bash
+# Undo gg-core-setup (and gg-deploy-hello) for one core. Then run aws-iot-unregister for the thing itself.
+#
+#   gg-core-teardown rpi-ex-... [--region eu-west-2]
+#
+# Removes the thing from its rpi-ex-gg- thing group and deletes its Greengrass core device record and its
+# core policy. A thing group left empty is deleted with its deployments. When no rpi-ex-gg- group is left,
+# also deletes the token-exchange role and alias, the rpi-ex.Hello component and its CloudWatch log groups.
+# Stop the nucleus on the device first, or it recreates the core device record.
+set -euo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+usage() { sed -n '2,/^set /p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit "${1:-0}"; }
+name=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --region) region=$2; shift 2 ;;
+    -h|--help) usage ;;
+    -*) usage 2 >&2 ;;
+    *) name=$1; shift ;;
+  esac
+done
+need
+[ -n "$name" ] || usage 2 >&2
+valid_thing "$name"
+
+for group in $(aws_ iot list-thing-groups-for-thing --thing-name "$name" --query 'thingGroups[].groupName' \
+                 --output text 2>/dev/null); do
+  [[ "$group" == "${PREFIX}gg-"* ]] || continue
+  aws_ iot remove-thing-from-thing-group --thing-group-name "$group" --thing-name "$name" >/dev/null
+  say "thing group $group: $name removed"
+done
+if aws_ greengrassv2 delete-core-device --core-device-thing-name "$name" >/dev/null 2>&1; then
+  say "core device $name: deleted"
+else
+  say "core device $name: none"
+fi
+
+policy="${PREFIX}gg-${name#"$PREFIX"}"
+for arn in $(thing_certs "$name"); do
+  aws_ iot detach-policy --policy-name "$policy" --target "$arn" 2>/dev/null || true
+done
+delete_policy_if_unused "$policy"
+
+# Empty groups go, with their deployments.
+remaining=0
+for group in "${PREFIX}gg-classic" "${PREFIX}gg-lite"; do
+  group_arn=$(aws_ iot describe-thing-group --thing-group-name "$group" --query thingGroupArn --output text 2>/dev/null) || continue
+  if [ -n "$(aws_ iot list-things-in-thing-group --thing-group-name "$group" --query 'things[]' --output text)" ]; then
+    say "thing group $group: still has cores, kept"
+    remaining=1
+    continue
+  fi
+  for d in $(aws_ greengrassv2 list-deployments --target-arn "$group_arn" --history-filter ALL \
+               --query 'deployments[].deploymentId' --output text); do
+    aws_ greengrassv2 cancel-deployment --deployment-id "$d" >/dev/null 2>&1 || true
+    aws_ greengrassv2 delete-deployment --deployment-id "$d"
+    say "deployment $d: deleted"
+  done
+  aws_ iot delete-thing-group --thing-group-name "$group" >/dev/null
+  say "thing group $group: deleted"
+done
+[ "$remaining" -eq 0 ] || exit 0
+
+# Nothing uses the shared pieces any more.
+if aws_ iot describe-role-alias --role-alias "$GG_ALIAS" >/dev/null 2>&1; then
+  aws_ iot delete-role-alias --role-alias "$GG_ALIAS"
+  say "role alias $GG_ALIAS: deleted"
+fi
+if aws_ iam get-role --role-name "$GG_ROLE" >/dev/null 2>&1; then
+  for p in $(aws_ iam list-role-policies --role-name "$GG_ROLE" --query 'PolicyNames[]' --output text); do
+    aws_ iam delete-role-policy --role-name "$GG_ROLE" --policy-name "$p"
+  done
+  aws_ iam delete-role --role-name "$GG_ROLE"
+  say "role $GG_ROLE: deleted"
+fi
+account=$(account_id)
+for arn in $(aws_ greengrassv2 list-component-versions \
+               --arn "arn:aws:greengrass:$(current_region):$account:components:$HELLO" \
+               --query 'componentVersions[].arn' --output text 2>/dev/null); do
+  aws_ greengrassv2 delete-component --arn "$arn"
+  say "component $HELLO ${arn##*:}: deleted"
+done
+for lg in "/aws/greengrass/UserComponent/$(current_region)/$HELLO" "/aws/greengrass/${PREFIX}lite"; do
+  if aws_ logs delete-log-group --log-group-name "$lg" 2>/dev/null; then say "log group $lg: deleted"; fi
+done

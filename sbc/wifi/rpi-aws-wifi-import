@@ -1,0 +1,75 @@
+#!/usr/bin/python3
+"""Import Wi-Fi settings from the boot partition into iwd, then delete them there (images only).
+
+    /boot/firmware/rpi-aws-wifi.txt, written on your computer after the image:
+        ssid=MyNetwork
+        password=my Wi-Fi password          (WPA2/WPA3 personal: 8-63 characters, or 64 hex digits)
+
+rpi-aws-wifi-import.service runs this at boot, before iwd, whenever the file is there. It writes the iwd
+profile /var/lib/iwd/<network>.psk (root, 0600), overwrites the file on the boot partition and deletes it.
+If the board already uses the key ladder, the profile is wrapped at once (rpi-aws-keyhelper wifi-wrap).
+An SD card may keep old copies of overwritten data (wear levelling): see docs/key-storage.md.
+"""
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SOURCE = Path("/boot/firmware/rpi-aws-wifi.txt")
+IWD_DIR = Path("/var/lib/iwd")
+WRAPPED_KEY = Path("/var/lib/rpi-aws-examples/device.key.wrapped")
+HELPER = "/usr/local/sbin/rpi-aws-keyhelper"
+
+
+def profile_name(ssid: str) -> str:
+    # iwd's rule: SSIDs of letters, digits, ' ', '-' and '_' keep their name; others are hex with a leading '='.
+    return f"{ssid}.psk" if re.fullmatch(r"[A-Za-z0-9 _-]+", ssid) else f"={ssid.encode().hex()}.psk"
+
+
+def destroy(path: Path) -> None:
+    size = path.stat().st_size
+    with open(path, "r+b") as f:
+        f.write(b"\0" * size)
+        f.flush()
+        os.fsync(f.fileno())
+    path.unlink()
+
+
+def main() -> int:
+    settings = {}
+    for line in SOURCE.read_text(encoding="utf-8").splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            settings[k.strip().lower()] = v.rstrip("\r")
+    ssid, password = settings.get("ssid", "").strip(), settings.get("password", "")
+    try:
+        if not 1 <= len(ssid.encode()) <= 32:
+            raise ValueError("ssid= must be 1 to 32 bytes")
+        if re.fullmatch(r"[0-9A-Fa-f]{64}", password):
+            secret = f"PreSharedKey={password}"
+        elif 8 <= len(password) <= 63:
+            secret = f"Passphrase={password}"
+        else:
+            raise ValueError("password= must be 8 to 63 characters, or 64 hex digits")
+    except ValueError as exc:
+        print(f"error: {SOURCE}: {exc}; nothing imported", file=sys.stderr)
+        destroy(SOURCE)
+        return 1
+    IWD_DIR.mkdir(mode=0o700, exist_ok=True)
+    target = IWD_DIR / profile_name(ssid)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"[Security]\n{secret}\n")
+        f.flush()
+        os.fsync(f.fileno())
+    destroy(SOURCE)
+    print(f"Wi-Fi: imported {ssid} into {target}; {SOURCE} deleted", file=sys.stderr)
+    if WRAPPED_KEY.exists():
+        subprocess.run([HELPER, "wifi-wrap"], check=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

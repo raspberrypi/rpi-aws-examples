@@ -1,0 +1,64 @@
+name: ci
+
+# Pull requests from forks run here with a read-only token and no secrets. Keep it that way:
+# - no pull_request_target or workflow_run triggers (they run with this repository's token and secrets);
+# - no secrets, no self-hosted runners;
+# - everything fetched is pinned to an exact commit or hash, so a moved tag or a new upload cannot change it.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          git ls-files | xargs grep -lE '^#!/(usr/)?bin/(env )?bash' | xargs shellcheck -x
+      - name: ruff
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ruff"
+          "$RUNNER_TEMP/ruff/bin/pip" install --quiet --only-binary :all: --require-hashes -r .github/ruff.txt
+          "$RUNNER_TEMP/ruff/bin/ruff" check --line-length 120 --extend-exclude Pi5AWSExample.py .
+
+  pico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        include:
+          - board: pico2_w
+            ladder: "OFF"
+          - board: pico2_w
+            ladder: "ON"
+          - board: pico_w
+            ladder: "OFF"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: toolchain and SDK
+        env:
+          SDK: ${{ runner.temp }}/pico-sdk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi
+          git clone --depth 1 --branch 2.2.0 https://github.com/raspberrypi/pico-sdk.git "$SDK"
+          # The 2.2.0 tag must still be the commit it was when this was written.
+          test "$(git -C "$SDK" rev-parse HEAD)" = a1438dff1d38bd9c65dbd693f0e5db4b9ae91779
+          git -C "$SDK" submodule update --init --recursive --depth 1
+      - name: build hello-mqtt
+        run: |
+          cmake -S pico/hello-mqtt -B build -G Ninja -DPICO_SDK_PATH="$RUNNER_TEMP/pico-sdk" \
+            -DPICO_BOARD=${{ matrix.board }} -DHELLO_KEY_LADDER=${{ matrix.ladder }}
+          cmake --build build

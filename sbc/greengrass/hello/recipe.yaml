@@ -1,0 +1,38 @@
+# The rpi-ex.Hello component. tools/gg-deploy-hello fills in HELLO_PY_BASE64 (hello.py) and publishes it.
+# Embedding the code keeps this example free of an S3 bucket; a real component ships its code as an
+# artifact in S3, which the token-exchange role must then be allowed to read.
+RecipeFormatVersion: "2020-01-25"
+ComponentName: rpi-ex.Hello
+ComponentVersion: "1.0.5"
+ComponentDescription: Publishes a count to rpi/<thingName>/count every 10 seconds and logs each one; logs messages on rpi/<thingName>/cmd.
+ComponentPublisher: rpi-aws-examples
+ComponentConfiguration:
+  DefaultConfiguration:
+    intervalSeconds: 10
+    accessControl:
+      aws.greengrass.ipc.mqttproxy:
+        rpi-ex.Hello:mqttproxy:1:
+          # The core's IoT policy limits it to its own rpi/<thingName>/ topics in the cloud. "rpi/*" is used
+          # here because the Java nucleus fills in {iot:thingName} in accessControl only when its
+          # interpolateComponentConfiguration option is on.
+          policyDescription: Publish and subscribe under rpi/ (the core's IoT policy allows only rpi/<thingName>/).
+          operations:
+            - aws.greengrass#PublishToIoTCore
+            - aws.greengrass#SubscribeToIoTCore
+          resources:
+            - rpi/*
+Manifests:
+  - Platform:
+      os: linux
+      # Both nuclei. Without this, a manifest is for the Java nucleus only, and a Nucleus Lite core
+      # (runtime aws_nucleus_lite) fails the deployment with "doesn't claim platform ... compatibility".
+      runtime: "*"
+    Lifecycle:
+      install:
+        Timeout: 900
+        Script: |
+          set -e
+          echo HELLO_PY_BASE64 | base64 -d > hello.py
+          [ -x venv/bin/python3 ] || python3 -m venv venv
+          venv/bin/pip install -q --no-cache-dir awsiotsdk==1.31.0
+      run: venv/bin/python3 -u hello.py {configuration:/intervalSeconds}

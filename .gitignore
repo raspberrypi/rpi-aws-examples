@@ -1,0 +1,24 @@
+# Device identity material never belongs in the repository
+*.key
+*.pem
+*.crt
+*.csr
+*.wrapped
+# Registration folders from aws-iot-register (certificate and config.json), if made inside the repository
+rpi-ex-*/
+# Build output
+build/
+work/
+dist/
+*.uf2
+*.elf
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+# Local Wi-Fi settings for test images
+*.psk
+# Editor settings
+.vscode/

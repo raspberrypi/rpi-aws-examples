@@ -1,0 +1,70 @@
+#!/bin/bash
+# Deploy the rpi-ex.Hello component, and the log component that sends its lines to CloudWatch Logs.
+#
+#   gg-deploy-hello --classic|--lite [--region eu-west-2]
+#
+# Publishes rpi-ex.Hello (HELLO_VERSION below) from sbc/greengrass/hello unless that version exists, then
+# deploys it to the thing group rpi-ex-gg-classic or rpi-ex-gg-lite (see gg-core-setup), with:
+#   --classic  aws.greengrass.LogManager: the component's log -> /aws/greengrass/UserComponent/<Region>/rpi-ex.Hello
+#   --lite     aws.greengrass.SystemLogForwarder: its journal  -> /aws/greengrass/rpi-ex-lite
+# Each core writes to a log stream ending in its thing name. Running it again makes a new deployment that
+# replaces the previous one for that group.
+set -euo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+LOG_MANAGER_VERSION=2.3.14
+SYSTEM_LOG_FORWARDER_VERSION=2.1.0
+HELLO_VERSION=1.0.5
+
+usage() { sed -n '2,/^set /p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit "${1:-0}"; }
+nucleus=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --classic) nucleus=classic; shift ;;
+    --lite) nucleus=lite; shift ;;
+    --region) region=$2; shift 2 ;;
+    -h|--help) usage ;;
+    *) usage 2 >&2 ;;
+  esac
+done
+need
+[ -n "$nucleus" ] || usage 2 >&2
+here="$TOOLS_DIR/../sbc/greengrass/hello"
+reg=$(current_region)
+account=$(account_id)
+
+arn="arn:aws:greengrass:$reg:$account:components:$HELLO:versions:$HELLO_VERSION"
+if aws_ greengrassv2 describe-component --arn "$arn" >/dev/null 2>&1; then
+  say "component $HELLO $HELLO_VERSION: exists"
+else
+  recipe=$(sed -e "s|HELLO_PY_BASE64|$(base64 -w0 "$here/hello.py")|" -e "s|^ComponentVersion: .*|ComponentVersion: \"$HELLO_VERSION\"|" \
+    "$here/recipe.yaml")
+  aws_ greengrassv2 create-component-version --inline-recipe "$(printf '%s' "$recipe" | base64 -w0)" >/dev/null
+  for i in $(seq 1 20); do
+    state=$(aws_ greengrassv2 describe-component --arn "$arn" --query status.componentState --output text)
+    [ "$state" = DEPLOYABLE ] && break
+    [ "$state" = FAILED ] && die "component $HELLO $HELLO_VERSION failed: $(aws_ greengrassv2 describe-component --arn "$arn" --query status.message --output text)"
+    [ "$i" -lt 20 ] || die "component $HELLO $HELLO_VERSION is still $state"
+    sleep 3
+  done
+  say "component $HELLO $HELLO_VERSION: published"
+fi
+
+group="${PREFIX}gg-$nucleus"
+group_arn=$(aws_ iot describe-thing-group --thing-group-name "$group" --query thingGroupArn --output text 2>/dev/null) \
+  || die "thing group $group not found: run gg-core-setup first"
+if [ "$nucleus" = classic ]; then
+  logs='"aws.greengrass.LogManager": {"componentVersion": "'$LOG_MANAGER_VERSION'", "configurationUpdate": {"merge":
+    "{\"periodicUploadIntervalSec\": 60, \"logsUploaderConfiguration\": {\"componentLogsConfigurationMap\": {\"'$HELLO'\": {\"minimumLogLevel\": \"INFO\"}}}}"}}'
+else
+  logs='"aws.greengrass.SystemLogForwarder": {"componentVersion": "'$SYSTEM_LOG_FORWARDER_VERSION'", "configurationUpdate": {"merge":
+    "{\"logGroup\": \"/aws/greengrass/'$PREFIX'lite\", \"maxUploadIntervalSec\": 60, \"filters\": {\"services\": [\"ggl.'$HELLO'*\"]}}"}}'
+fi
+# Reset hello's configuration to its recipe's defaults: a nucleus keeps a component's configuration across
+# versions, so a changed default (such as accessControl) would otherwise never reach a core that had it.
+components='{"'$HELLO'": {"componentVersion": "'$HELLO_VERSION'", "configurationUpdate": {"reset": [""]}}, '$logs'}'
+id=$(aws_ greengrassv2 create-deployment --target-arn "$group_arn" --deployment-name "$group-hello" \
+  --components "$components" --query deploymentId --output text)
+say "deployment $id: created for $group"
+say "Follow it with: aws greengrassv2 list-effective-deployments --core-device-thing-name <thing>"

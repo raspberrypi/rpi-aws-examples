@@ -1,0 +1,77 @@
+# METABEGIN
+# X-Env-Layer-Name: rpi-aws-examples-base
+# X-Env-Layer-Category: app
+# X-Env-Layer-Desc: rpi-aws-examples key tools: rpi-aws-keygen, the key
+#  ladder helper and its unwrap unit, rpi-aws-otp-init and rpi-aws-gg-setup,
+#  the service user rpi-ex and /etc/rpi-aws-examples; mDNS (avahi) for
+#  <hostname>.local; Wi-Fi settings imported from the boot partition at
+#  first boot. Holds no per-device or secret value: each device makes its
+#  own key after first boot, and gets Wi-Fi settings on its own card.
+# X-Env-Layer-Version: 0.1.0
+#
+# X-Env-VarPrefix: awsex
+#
+# X-Env-Var-src:
+# X-Env-Var-src-Desc: Path on the build host to this repository (its sbc
+#  directory is copied in).
+# X-Env-Var-src-Required: y
+# X-Env-Var-src-Valid: string
+# X-Env-Var-src-Set: y
+# METAEND
+---
+mmdebstrap:
+  packages:
+    - ca-certificates
+    - openssl
+    - python3-cryptography
+    - rpifwcrypto
+    - cloud-guest-utils
+    # Answers <hostname>.local, as Raspberry Pi OS from Imager does; trixie-minbase has no mDNS.
+    - avahi-daemon
+    - libnss-mdns
+  customize-hooks:
+    # The same install script as on a running Pi, without apt (the packages are listed above).
+    - mkdir -p $1/tmp/rpi-aws-examples && cp -r ${IGconf_awsex_src}/sbc $1/tmp/rpi-aws-examples/
+    - chroot $1 bash /tmp/rpi-aws-examples/sbc/install.sh --no-client --no-apt --wifi-import
+    - rm -rf $1/tmp/rpi-aws-examples
+    # An image written to a bigger card keeps the image's root partition size: grow the partition, then
+    # the filesystem, at first boot. Both are no-ops once the card is filled.
+    - |-
+      cat > $1/usr/local/sbin/rpi-aws-examples-growpart <<'SCRIPT'
+      #!/bin/sh
+      # Grow the root partition into the free space after it; growpart exits 1 for "no change".
+      set -eu
+      part=$(basename "$(readlink -f "$(findmnt -nvo SOURCE /)")")
+      disk=$(lsblk -no PKNAME "/dev/$part")
+      rc=0
+      growpart "/dev/$disk" "$(cat "/sys/class/block/$part/partition")" || rc=$?
+      [ "$rc" -le 1 ]
+      SCRIPT
+      chmod 755 $1/usr/local/sbin/rpi-aws-examples-growpart
+    - |-
+      cat > $1/etc/systemd/system/rpi-aws-examples-growfs.service <<'UNIT'
+      [Unit]
+      Description=Grow the root partition and filesystem to fill the storage
+      DefaultDependencies=no
+      After=local-fs.target
+      Before=sysinit.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/rpi-aws-examples-growpart
+      ExecStart=/usr/lib/systemd/systemd-growfs /
+
+      [Install]
+      WantedBy=sysinit.target
+      UNIT
+    - chroot $1 systemctl enable rpi-aws-examples-growfs.service
+    # trixie-minbase configures both eth0 and wlan0, and network-online.target would wait for both: on a
+    # board using only one, that is a two-minute wait at every boot. Online once any link is.
+    - |-
+      mkdir -p $1/etc/systemd/system/systemd-networkd-wait-online.service.d
+      cat > $1/etc/systemd/system/systemd-networkd-wait-online.service.d/50-any.conf <<'UNIT'
+      [Service]
+      ExecStart=
+      ExecStart=/usr/lib/systemd/systemd-networkd-wait-online --any
+      UNIT

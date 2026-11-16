@@ -1,0 +1,15 @@
+[Unit]
+Description=Hello, AWS IoT: publishes a count every 10 s
+Wants=network-online.target
+After=network-online.target time-sync.target rpi-aws-keyunwrap.service
+# Not before the device is registered (no restart loop on a new device).
+ConditionPathExists=/etc/rpi-aws-examples/device.crt
+
+[Service]
+User=rpi-ex
+ExecStart=/usr/local/bin/rpi-aws-hello
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

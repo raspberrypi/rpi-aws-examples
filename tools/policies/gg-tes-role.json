@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LogGroups",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:DescribeLogStreams"],
+      "Resource": "arn:aws:logs:REGION:ACCOUNT:log-group:/aws/greengrass/*"
+    },
+    {
+      "Sid": "OwnStreamsOnly",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:REGION:ACCOUNT:log-group:/aws/greengrass/*:log-stream:*${credentials-iot:ThingName}"
+    }
+  ]
+}
