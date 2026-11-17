@@ -1,0 +1,88 @@
+#!/bin/bash
+# Register a device with AWS IoT from its certificate signing request (CSR).
+#
+#   aws-iot-register --csr device.csr [--name rpi-ex-...] [--region eu-west-2] [--out DIR]
+#
+# Creates the thing (named after the CSR's CN unless --name is given), a certificate signed by AWS IoT from
+# the CSR (active), and the shared rpi-ex-client policy, then attaches them. Writes the certificate and a
+# config.json (thing name, endpoint, Region) to DIR (default ./<thing>) for you to copy to the device, and
+# prints the endpoint. The private key never leaves the device: only its CSR comes here.
+#
+# Safe to run again with the same CSR: an active certificate for the same key is reused, not duplicated.
+# aws-iot-unregister removes everything this creates.
+set -euo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+usage() { sed -n '2,/^set /p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit "${1:-0}"; }
+csr="" name="" out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --csr) csr=$2; shift 2 ;;
+    --name) name=$2; shift 2 ;;
+    --region) region=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    -h|--help) usage ;;
+    *) usage 2 >&2 ;;
+  esac
+done
+need
+[ -n "$csr" ] || usage 2 >&2
+[ -r "$csr" ] || die "cannot read $csr"
+openssl req -in "$csr" -noout -verify >/dev/null 2>&1 || die "$csr is not a valid, self-signed CSR"
+
+cn=$(openssl req -in "$csr" -noout -subject -nameopt RFC2253 | sed -n 's/.*CN=\([^,]*\).*/\1/p')
+name=${name:-$cn}
+[ -n "$name" ] || die "the CSR has no CN; pass --name"
+valid_thing "$name"
+[ "$name" = "$cn" ] || say "note: the thing name $name differs from the CSR's CN ($cn)"
+out=${out:-./$name}
+
+# The thing.
+if aws_ iot describe-thing --thing-name "$name" >/dev/null 2>&1; then
+  say "thing $name: exists"
+else
+  aws_ iot create-thing --thing-name "$name" >/dev/null
+  say "thing $name: created"
+fi
+
+# The certificate: reuse an active one for this key, if the thing has one.
+want=$(pubkey_hash_csr "$csr")
+cert_arn="" cert_pem=""
+for arn in $(thing_certs "$name"); do
+  id=${arn##*/}
+  status=$(aws_ iot describe-certificate --certificate-id "$id" --query certificateDescription.status --output text)
+  [ "$status" = "ACTIVE" ] || continue
+  pem=$(aws_ iot describe-certificate --certificate-id "$id" --query certificateDescription.certificatePem --output text)
+  if [ "$(printf '%s\n' "$pem" | pubkey_hash_cert)" = "$want" ]; then
+    cert_arn=$arn cert_pem=$pem
+    say "certificate ${id:0:12}…: exists for this key"
+    break
+  fi
+done
+if [ -z "$cert_arn" ]; then
+  read -r cert_arn id < <(aws_ iot create-certificate-from-csr --certificate-signing-request "file://$csr" \
+    --set-as-active --query '[certificateArn, certificateId]' --output text)
+  cert_pem=$(aws_ iot describe-certificate --certificate-id "$id" \
+    --query certificateDescription.certificatePem --output text)
+  say "certificate ${id:0:12}…: created from the CSR"
+fi
+
+# The policy, and the attachments (both are no-ops when already attached).
+ensure_policy "$CLIENT_POLICY" client.json
+aws_ iot attach-policy --policy-name "$CLIENT_POLICY" --target "$cert_arn"
+aws_ iot attach-thing-principal --thing-name "$name" --principal "$cert_arn" --thing-principal-type EXCLUSIVE_THING
+say "attached: $CLIENT_POLICY and $name to the certificate"
+
+endpoint=$(aws_ iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
+mkdir -p "$out"
+printf '%s\n' "$cert_pem" > "$out/device.crt"
+cat > "$out/config.json" <<EOF
+{"thingName": "$name", "endpoint": "$endpoint", "region": "$(current_region)"}
+EOF
+say ""
+say "endpoint:    $endpoint"
+say "certificate: $out/device.crt"
+say "config:      $out/config.json"
+say "Copy both to the device (see the README for where they go)."
+echo "$endpoint"

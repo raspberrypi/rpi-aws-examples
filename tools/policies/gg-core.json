@@ -1,0 +1,49 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "iot:Connect",
+      "Resource": "arn:aws:iot:REGION:ACCOUNT:client/THING*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["iot:Publish", "iot:Receive"],
+      "Resource": [
+        "arn:aws:iot:REGION:ACCOUNT:topic/$aws/things/THING/greengrass/health/json",
+        "arn:aws:iot:REGION:ACCOUNT:topic/$aws/things/THING/greengrassv2/health/json",
+        "arn:aws:iot:REGION:ACCOUNT:topic/$aws/things/THING/jobs/*",
+        "arn:aws:iot:REGION:ACCOUNT:topic/$aws/things/THING/shadow/*",
+        "arn:aws:iot:REGION:ACCOUNT:topic/rpi/THING/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": [
+        "arn:aws:iot:REGION:ACCOUNT:topicfilter/$aws/things/THING/jobs/*",
+        "arn:aws:iot:REGION:ACCOUNT:topicfilter/$aws/things/THING/shadow/*",
+        "arn:aws:iot:REGION:ACCOUNT:topicfilter/rpi/THING/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:AssumeRoleWithCertificate",
+      "Resource": "arn:aws:iot:REGION:ACCOUNT:rolealias/rpi-ex-gg-tes-alias"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "greengrass:GetComponentVersionArtifact",
+        "greengrass:ResolveComponentCandidates",
+        "greengrass:GetDeploymentConfiguration"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "greengrass:ListThingGroupsForCoreDevice",
+      "Resource": "arn:aws:iot:REGION:ACCOUNT:thing/THING"
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+# METABEGIN
+# X-Env-Layer-Name: rpi-aws-examples-greengrass-lite
+# X-Env-Layer-Category: app
+# X-Env-Layer-Desc: Greengrass Nucleus Lite, from its release .deb (pinned, hash
+#  checked on the build host). Not started: rpi-aws-gg-setup configures and
+#  starts it on the device, with its own certificate.
+# X-Env-Layer-Version: 0.1.0
+# X-Env-Layer-Requires: rpi-aws-examples-base
+#
+# X-Env-VarPrefix: awsexggl
+#
+# X-Env-Var-version: 2.7.0
+# X-Env-Var-version-Desc: Nucleus Lite release. Change it with sha256.
+# X-Env-Var-version-Required: n
+# X-Env-Var-version-Valid: string
+# X-Env-Var-version-Set: y
+#
+# X-Env-Var-sha256: bcf9906a697bf102e22aad6fa7ea21f4e2dc8918c70012a1bbc9e1e98c5d6e35
+# X-Env-Var-sha256-Desc: SHA-256 of the release's aws-greengrass-lite-deb-arm64.zip.
+# X-Env-Var-sha256-Required: n
+# X-Env-Var-sha256-Valid: string
+# X-Env-Var-sha256-Set: y
+# METAEND
+---
+mmdebstrap:
+  # The .deb's dependencies, so that dpkg alone installs it (no apt inside the hook).
+  packages:
+    - cgroup-tools
+    - libcurl4t64
+    - libevent-2.1-7t64
+    - libsqlite3-0
+    - libssl3t64
+    - libsystemd0
+    - liburiparser1
+    - libuuid1
+    - libyaml-0-2
+    - python3-venv
+  customize-hooks:
+    - |-
+      set -eu
+      tmp=$1/tmp/greengrass-lite
+      mkdir -p $tmp/bin
+      curl -fsSL -o $tmp/lite.zip \
+        "https://github.com/aws-greengrass/aws-greengrass-lite/releases/download/v${IGconf_awsexggl_version}/aws-greengrass-lite-deb-arm64.zip"
+      echo "${IGconf_awsexggl_sha256}  $tmp/lite.zip" | sha256sum -c --quiet - \
+        || { echo "greengrass-lite: hash mismatch" >&2; exit 1; }
+      unzip -q -o $tmp/lite.zip -d $tmp
+      # The package's postinst runs "systemctl reset-failed", which fails without a running systemd. A shim
+      # first on PATH drops the verbs that need one; "enable" goes through.
+      printf '%s\n' '#!/bin/sh' 'case "$1" in reset-failed|daemon-reload|start|stop|restart) exit 0 ;; esac' \
+        'exec /usr/bin/systemctl "$@"' > $tmp/bin/systemctl
+      chmod 755 $tmp/bin/systemctl
+      chroot $1 env PATH=/tmp/greengrass-lite/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        sh -c 'dpkg -i /tmp/greengrass-lite/aws-greengrass-lite*.deb'
+      rm -rf $tmp
+    # Started by rpi-aws-gg-setup, with this device's configuration; not before. The postinst enables all of
+    # the package's units, and its sockets would start at every boot (sockets.target): disable them all.
+    - |-
+      chroot $1 sh -c 'systemctl disable greengrass-lite.target \
+        $(dpkg -L aws-greengrass-lite | sed -n "s|^/.*/systemd/system/\(ggl\.[^/]*\)\$|\1|p")'

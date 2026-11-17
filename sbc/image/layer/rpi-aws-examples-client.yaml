@@ -1,0 +1,19 @@
+# METABEGIN
+# X-Env-Layer-Name: rpi-aws-examples-client
+# X-Env-Layer-Category: app
+# X-Env-Layer-Desc: The rpi-aws-hello client (AWS IoT Device SDK for Python in
+#  /opt/rpi-aws-examples/venv) and its systemd unit, on top of
+#  rpi-aws-examples-base. The unit starts once the device has its certificate.
+# X-Env-Layer-Version: 0.1.0
+# X-Env-Layer-Requires: rpi-aws-examples-base
+# X-Env-VarRequires: IGconf_awsex_src
+# METAEND
+---
+mmdebstrap:
+  packages:
+    - python3-venv
+  customize-hooks:
+    - mkdir -p $1/tmp/rpi-aws-examples && cp -r ${IGconf_awsex_src}/sbc $1/tmp/rpi-aws-examples/
+    - chroot $1 bash /tmp/rpi-aws-examples/sbc/install.sh --no-apt
+    - rm -rf $1/tmp/rpi-aws-examples
+    - chroot $1 systemctl enable rpi-aws-hello.service

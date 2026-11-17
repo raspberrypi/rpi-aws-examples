@@ -1,0 +1,23 @@
+# Raspberry Pi 4, Raspberry Pi OS Trixie (minimal), with a Greengrass Classic core (Java nucleus).
+# Tested 2026-11-12 on a Pi 4 (wrapped key): image built, booted, enrolled; count and cmd on MQTT, log lines in CloudWatch, and after a reboot. Earlier (2026-10-30) also with a file key.
+# Build: see sbc/image/README.md. Pass this repository and your SSH public key:
+#   -- IGconf_awsex_src=<repository> IGconf_ssh_pubkey_user1=<key.pub>
+device:
+  layer: rpi4
+  user1: pi
+  # Desk setup: pi may use sudo without a password (it has none; it logs in with the SSH key).
+  # A product image leaves this out.
+  user1sudo: nopasswd
+
+image:
+  layer: image-rpios
+  boot_part_size: 200%
+  root_part_size: 300%
+  name: rpi-aws-examples-pi4-greengrass-classic
+
+layer:
+  base: trixie-minbase
+  app: rpi-aws-examples-greengrass-classic
+
+ssh:
+  pubkey_only: y

@@ -1,0 +1,196 @@
+#!/bin/bash
+# Install and start a Greengrass nucleus on this Pi, as the core device registered for it.
+#
+#   sudo rpi-aws-gg-setup [--install-only]
+#   sudo rpi-aws-gg-setup --remove
+#
+# Reads /etc/rpi-aws-examples/config.json (from aws-iot-register, then gg-core-setup on your computer), whose
+# "nucleus" is classic or lite, and uses this device's key where rpi-aws-keygen made it:
+#   classic  Greengrass Classic, the Java nucleus (Java 17+), as greengrass.service, in /greengrass/v2.
+#            Components run as ggc_user. The nucleus runs as root and reads the key in place.
+#   lite     Greengrass Nucleus Lite (C, small boards), as greengrass-lite.target. Its daemons run as
+#            ggcore, which joins group rpi-ex to read the key; components run as gg_component, which cannot.
+# The nucleus software comes from the image when the image layer installed it, otherwise it is downloaded
+# here (pinned below). --install-only installs the software and stops (the image layers use this).
+# Returns once the nucleus has connected to AWS IoT.
+# --remove stops the nucleus and deletes the core's own state (its configuration, deployed components and
+# their units), keeping the nucleus software, so the Pi can be set up again as a new core.
+set -euo pipefail
+
+NUCLEUS_VERSION=2.18.4
+LITE_VERSION=2.7.0
+LITE_SHA256=bcf9906a697bf102e22aad6fa7ea21f4e2dc8918c70012a1bbc9e1e98c5d6e35  # aws-greengrass-lite-deb-arm64.zip
+CLASSIC_INSTALLER=/opt/greengrass/installer
+CLASSIC_ROOT=/greengrass/v2
+CLASSIC_DROPIN=/etc/systemd/system/greengrass.service.d/rpi-aws-examples.conf
+DIR=/etc/rpi-aws-examples
+CA=/etc/ssl/certs/Amazon_Root_CA_1.pem
+
+die() { echo "error: $*" >&2; exit 1; }
+say() { echo "$*" >&2; }
+[ "$(id -u)" -eq 0 ] || die "run with sudo"
+
+# The Lite package's own units. Its postinst enables them all, and its sockets start at boot (sockets.target)
+# even with no configuration; they stay disabled until this Pi is set up as a core.
+lite_units() { dpkg -L aws-greengrass-lite | sed -n 's|^/.*/systemd/system/\(ggl\.[^/]*\)$|\1|p'; }
+
+remove() {
+  if [ -e /etc/systemd/system/greengrass.service ] || [ -d "$CLASSIC_ROOT" ]; then
+    systemctl disable --now greengrass.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/greengrass.service "$CLASSIC_DROPIN"
+    rmdir --ignore-fail-on-non-empty "$(dirname "$CLASSIC_DROPIN")" 2>/dev/null || true
+    rm -rf "$CLASSIC_ROOT"
+    rmdir --ignore-fail-on-non-empty "$(dirname "$CLASSIC_ROOT")"
+    systemctl daemon-reload
+    systemctl reset-failed greengrass.service 2>/dev/null || true
+    say "Greengrass Classic: stopped; $CLASSIC_ROOT removed"
+  fi
+  if dpkg -s aws-greengrass-lite >/dev/null 2>&1; then
+    # shellcheck disable=SC2046
+    systemctl disable --now greengrass-lite.target $(lite_units) >/dev/null 2>&1 || true
+    # Component units are links into /var/lib/greengrass; the package's own units are not.
+    for unit in $(find /etc/systemd/system -name 'ggl.*' -lname '/var/lib/greengrass/*' -printf '%f\n' | sort -u); do
+      systemctl disable --now "$unit" >/dev/null 2>&1 || true
+    done
+    find /etc/systemd/system -name 'ggl.*' -lname '/var/lib/greengrass/*' -delete
+    find /var/lib/greengrass -mindepth 1 -delete
+    rm -f /etc/greengrass/config.yaml /etc/greengrass/config.d/zz-rpi-aws-examples.yaml
+    systemctl daemon-reload
+    systemctl reset-failed 'ggl.*' 2>/dev/null || true
+    say "Greengrass Nucleus Lite: stopped; its configuration and components removed"
+  fi
+}
+if [ "${1:-}" = "--remove" ]; then remove; exit 0; fi
+install_only=0
+[ "${1:-}" = "--install-only" ] && { install_only=1; shift; }
+nucleus=${1:-}
+export DEBIAN_FRONTEND=noninteractive
+
+if [ "$install_only" -eq 0 ]; then
+  [ -r "$DIR/config.json" ] || die "$DIR/config.json is missing: run rpi-aws-keygen --install first"
+  conf() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$DIR/config.json" "$1"; }
+  thing=$(conf thingName) endpoint=$(conf endpoint) reg=$(conf region)
+  cred=$(conf credEndpoint) alias=$(conf roleAlias) nucleus=$(conf nucleus)
+  [ -n "$cred" ] && [ -n "$alias" ] || die "$DIR/config.json has no Greengrass settings: run gg-core-setup on your computer and copy it again"
+  case "$(cat "$DIR/keystore")" in
+    file) key=$DIR/device.key ;;
+    wrapped) key=/run/rpi-aws-examples/device.key ;;
+    *) die "no device key: run rpi-aws-keygen first" ;;
+  esac
+  [ -r "$key" ] || die "$key is missing"
+fi
+case "$nucleus" in classic|lite) ;; *) die "usage: rpi-aws-gg-setup --install-only classic|lite" ;; esac
+
+# Components in Python make their own environment.
+apt-get install -y -q python3-venv >/dev/null
+
+install_classic() {
+  apt-get install -y -q default-jre-headless unzip curl >/dev/null
+  [ -r "$CLASSIC_INSTALLER/lib/Greengrass.jar" ] && return
+  say "Downloading the Greengrass nucleus $NUCLEUS_VERSION"
+  tmp=$(mktemp -d)
+  curl -fsSL -o "$tmp/nucleus.zip" "https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-$NUCLEUS_VERSION.zip"
+  mkdir -p "$CLASSIC_INSTALLER"
+  unzip -q -o "$tmp/nucleus.zip" -d "$CLASSIC_INSTALLER"
+  rm -rf "$tmp"
+}
+
+install_lite() {
+  dpkg -s aws-greengrass-lite >/dev/null 2>&1 && return
+  apt-get install -y -q unzip curl >/dev/null
+  say "Downloading Greengrass Nucleus Lite $LITE_VERSION"
+  tmp=$(mktemp -d)
+  curl -fsSL -o "$tmp/lite.zip" \
+    "https://github.com/aws-greengrass/aws-greengrass-lite/releases/download/v$LITE_VERSION/aws-greengrass-lite-deb-arm64.zip"
+  echo "$LITE_SHA256  $tmp/lite.zip" | sha256sum -c --quiet - || die "Nucleus Lite download: hash mismatch"
+  unzip -q -o "$tmp/lite.zip" -d "$tmp"
+  apt-get install -y -q "$tmp"/aws-greengrass-lite*.deb >/dev/null
+  rm -rf "$tmp"
+  # Lite starts when it is configured, not before.
+  # shellcheck disable=SC2046
+  systemctl disable --now greengrass-lite.target $(lite_units) >/dev/null 2>&1 || true
+  systemctl reset-failed 'ggl.*' 2>/dev/null || true
+}
+
+if [ "$nucleus" = classic ]; then install_classic; else install_lite; fi
+[ "$install_only" -eq 1 ] && { say "Installed the $nucleus nucleus; not configured."; exit 0; }
+
+since=$(date +%s)
+if [ "$nucleus" = classic ]; then
+  if systemctl is-active --quiet greengrass.service; then
+    say "greengrass.service is already running: to set it up again, remove $CLASSIC_ROOT first"
+    exit 0
+  fi
+  cfg=$(mktemp --suffix=.yaml)
+  cat > "$cfg" <<EOF
+---
+system:
+  certificateFilePath: "$DIR/device.crt"
+  privateKeyPath: "$key"
+  rootCaPath: "$CA"
+  rootpath: "$CLASSIC_ROOT"
+  thingName: "$thing"
+services:
+  aws.greengrass.Nucleus:
+    componentType: "NUCLEUS"
+    version: "$NUCLEUS_VERSION"
+    configuration:
+      awsRegion: "$reg"
+      iotRoleAlias: "$alias"
+      iotDataEndpoint: "$endpoint"
+      iotCredEndpoint: "$cred"
+EOF
+  # The installer's unit starts after network.target, before DNS works on a fast-booting Pi: the nucleus's
+  # first credential fetch then fails, and it waits 5 minutes before trying again (no logs in CloudWatch).
+  mkdir -p "$(dirname "$CLASSIC_DROPIN")"
+  cat > "$CLASSIC_DROPIN" <<'EOF'
+[Unit]
+Wants=network-online.target
+After=network-online.target
+EOF
+  java -Droot="$CLASSIC_ROOT" -Dlog.store=FILE -jar "$CLASSIC_INSTALLER/lib/Greengrass.jar" \
+    --init-config "$cfg" --component-default-user ggc_user:ggc_group --setup-system-service true >/dev/null
+  rm -f "$cfg"
+  connected() { grep -qs "Successfully connected to AWS IoT Core" "$CLASSIC_ROOT"/logs/greengrass.log; }
+  where="$CLASSIC_ROOT/logs/greengrass.log"
+else
+  usermod -aG rpi-ex ggcore
+  id -nG gg_component | grep -qw rpi-ex && die "gg_component must not be in group rpi-ex"
+  cat > /etc/greengrass/config.yaml <<EOF
+---
+system:
+  privateKeyPath: "$key"
+  certificateFilePath: "$DIR/device.crt"
+  rootCaPath: "$CA"
+  rootPath: "/var/lib/greengrass"
+  thingName: "$thing"
+services:
+  aws.greengrass.NucleusLite:
+    componentType: "NUCLEUS"
+    configuration:
+      awsRegion: "$reg"
+      iotCredEndpoint: "$cred"
+      iotDataEndpoint: "$endpoint"
+      iotRoleAlias: "$alias"
+EOF
+  # After the package's own drop-in, so it wins: components run as gg_component, which cannot read the key.
+  cat > /etc/greengrass/config.d/zz-rpi-aws-examples.yaml <<'EOF'
+---
+services:
+  aws.greengrass.NucleusLite:
+    configuration:
+      runWithDefault:
+        posixUser: "gg_component:gg_component"
+EOF
+  # shellcheck disable=SC2046
+  systemctl enable greengrass-lite.target $(lite_units) >/dev/null 2>&1
+  systemctl restart greengrass-lite.target
+  connected() { journalctl -u ggl.core.iotcored.service --since "@$since" -o cat --no-pager | grep "Connected to IoT core" >/dev/null; }
+  where="journalctl -u ggl.core.iotcored"
+fi
+
+for _ in $(seq 1 90); do
+  connected && { say "The $nucleus nucleus is connected to AWS IoT as $thing."; exit 0; }
+  sleep 2
+done
+die "the nucleus did not connect within 3 minutes; see $where"

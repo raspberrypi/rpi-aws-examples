@@ -1,0 +1,85 @@
+#!/bin/bash
+# Make a registered thing a Greengrass core device (run after aws-iot-register).
+#
+#   gg-core-setup rpi-ex-... --classic|--lite [--region eu-west-2] [--out DIR]
+#
+# Creates, or reuses:
+#   - the token-exchange role rpi-ex-gg-tes (components may write CloudWatch Logs under /aws/greengrass/,
+#     each core only to its own log streams; nothing else) and its role alias rpi-ex-gg-tes-alias;
+#   - the core policy rpi-ex-gg-<thing> (connect as the thing, Greengrass's own topics, rpi/<thing>/*,
+#     the role alias, and the Greengrass data plane), attached to the thing's certificate;
+#   - the thing group rpi-ex-gg-classic or rpi-ex-gg-lite, with the thing in it. Deployments target it.
+# Adds the Region, credential endpoint and role alias to DIR/config.json (default ./<thing>), for the device.
+# gg-core-teardown removes all of it.
+set -euo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+usage() { sed -n '2,/^set /p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit "${1:-0}"; }
+name="" nucleus="" out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --classic) nucleus=classic; shift ;;
+    --lite) nucleus=lite; shift ;;
+    --region) region=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    -h|--help) usage ;;
+    -*) usage 2 >&2 ;;
+    *) name=$1; shift ;;
+  esac
+done
+need
+[ -n "$name" ] && [ -n "$nucleus" ] || usage 2 >&2
+valid_thing "$name"
+out=${out:-./$name}
+[ -r "$out/config.json" ] || die "$out/config.json is missing: run aws-iot-register first"
+aws_ iot describe-thing --thing-name "$name" >/dev/null 2>&1 || die "thing $name not found: run aws-iot-register first"
+certs=$(thing_certs "$name")
+[ -n "$certs" ] || die "thing $name has no certificate: run aws-iot-register first"
+
+# The token-exchange role and its alias, shared by all cores.
+if aws_ iam get-role --role-name "$GG_ROLE" >/dev/null 2>&1; then
+  say "role $GG_ROLE: exists"
+else
+  aws_ iam create-role --role-name "$GG_ROLE" --assume-role-policy-document "$(render_policy gg-tes-trust.json)" \
+    --description "Greengrass token exchange role (rpi-aws-examples)" >/dev/null
+  say "role $GG_ROLE: created"
+fi
+aws_ iam put-role-policy --role-name "$GG_ROLE" --policy-name "$GG_ROLE-logs" \
+  --policy-document "$(render_policy gg-tes-role.json)"
+if aws_ iot describe-role-alias --role-alias "$GG_ALIAS" >/dev/null 2>&1; then
+  say "role alias $GG_ALIAS: exists"
+else
+  role_arn=$(aws_ iam get-role --role-name "$GG_ROLE" --query Role.Arn --output text)
+  # A new role can take a few seconds to be usable.
+  for i in 1 2 3 4 5 6; do
+    aws_ iot create-role-alias --role-alias "$GG_ALIAS" --role-arn "$role_arn" >/dev/null 2>&1 && break
+    [ "$i" -lt 6 ] || die "could not create role alias $GG_ALIAS"
+    sleep 5
+  done
+  say "role alias $GG_ALIAS: created"
+fi
+
+# The core policy, for this thing only.
+policy="${PREFIX}gg-${name#"$PREFIX"}"
+ensure_policy "$policy" gg-core.json "$name"
+for arn in $certs; do
+  aws_ iot attach-policy --policy-name "$policy" --target "$arn"
+done
+say "policy $policy: attached to the thing's certificate"
+
+# The thing group.
+group="${PREFIX}gg-$nucleus"
+aws_ iot describe-thing-group --thing-group-name "$group" >/dev/null 2>&1 \
+  || { aws_ iot create-thing-group --thing-group-name "$group" >/dev/null; say "thing group $group: created"; }
+aws_ iot add-thing-to-thing-group --thing-group-name "$group" --thing-name "$name"
+say "thing group $group: $name added"
+
+cred=$(aws_ iot describe-endpoint --endpoint-type iot:CredentialProvider --query endpointAddress --output text)
+data=$(aws_ iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
+cat > "$out/config.json" <<EOF
+{"thingName": "$name", "endpoint": "$data", "region": "$(current_region)",
+ "credEndpoint": "$cred", "roleAlias": "$GG_ALIAS", "nucleus": "$nucleus"}
+EOF
+say ""
+say "config: $out/config.json (now with the Greengrass settings). Copy it and device.crt to the device."

@@ -1,0 +1,2 @@
+# ruff for CI, pinned by hash (the Linux x86_64 wheel). To update: the new version and its wheel's sha256 from PyPI.
+ruff==0.17.3 --hash=sha256:7fa4b0f931cdbcb8a52044f370a3eb429fb42eb88807b0e800fcaa98dd42b24e

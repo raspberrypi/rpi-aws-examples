@@ -1,0 +1,24 @@
+# Raspberry Pi Zero 2 W, Raspberry Pi OS Trixie (minimal), with a Greengrass Nucleus Lite core.
+# Tested 2026-11-04 on a Zero 2 W (wrapped key; Wi-Fi from the boot partition, wrapped too): image built, booted, enrolled; count and cmd on MQTT, log lines in CloudWatch, and after a reboot. Earlier (2026-10-30) also with a file key.
+# No Ethernet: put Wi-Fi settings on each card's boot partition, rpi-aws-wifi.txt (see sbc/image/README.md).
+# Build: see sbc/image/README.md. Pass this repository and your SSH public key:
+#   -- IGconf_awsex_src=<repository> IGconf_ssh_pubkey_user1=<key.pub>
+device:
+  layer: rpizero2w
+  user1: pi
+  # Desk setup: pi may use sudo without a password (it has none; it logs in with the SSH key).
+  # A product image leaves this out.
+  user1sudo: nopasswd
+
+image:
+  layer: image-rpios
+  boot_part_size: 200%
+  root_part_size: 300%
+  name: rpi-aws-examples-zero2w-greengrass-lite
+
+layer:
+  base: trixie-minbase
+  app: rpi-aws-examples-greengrass-lite
+
+ssh:
+  pubkey_only: y

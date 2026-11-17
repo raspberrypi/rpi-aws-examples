@@ -1,0 +1,12 @@
+[Unit]
+Description=Import Wi-Fi settings from the boot partition into iwd
+ConditionPathExists=/boot/firmware/rpi-aws-wifi.txt
+RequiresMountsFor=/boot/firmware
+Before=iwd.service rpi-aws-keyunwrap.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rpi-aws-wifi-import
+
+[Install]
+WantedBy=multi-user.target
