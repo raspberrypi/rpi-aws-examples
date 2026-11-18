@@ -1,0 +1,86 @@
+#!/bin/bash
+# Build the Kinesis Video Streams producer and install the camera streamer on this Pi.
+#
+#   sudo sbc/kvs/rpi-aws-kvs-setup [kvs.json]
+#
+# Run from a copy of the repository, after sbc/install.sh. Installs the GStreamer and build packages, builds
+# kvssink (the GStreamer plugin of the Amazon Kinesis Video Streams Producer SDK for C++, pinned below) in
+# /opt/rpi-aws-examples/kvs, installs rpi-aws-kvs and rpi-aws-kvs.service, and adds rpi-ex to the video group
+# so that it can use the camera. With kvs.json (from kvs-setup on your computer), also installs it in
+# /etc/rpi-aws-examples. Safe to run again: a build of the pinned version is kept.
+#
+# Refuses to install packages if that would upgrade ones already installed: a partial upgrade can leave the
+# camera stack broken (libcamera changes its ABI between builds). Update the Pi first.
+set -euo pipefail
+
+SDK_VERSION=v3.6.0
+SDK_COMMIT=a6efdf5d2fe1fcc5be85048a0c1b6a90ab80ff72
+SDK_URL=https://github.com/awslabs/amazon-kinesis-video-streams-producer-sdk-cpp.git
+KVS_DIR=/opt/rpi-aws-examples/kvs
+DIR=/etc/rpi-aws-examples
+PKGS=(git cmake build-essential pkg-config libssl-dev libcurl4-openssl-dev liblog4cplus-dev
+      libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-tools gstreamer1.0-libcamera
+      gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly)
+
+here=$(cd "$(dirname "$0")" && pwd)
+die() { echo "error: $*" >&2; exit 1; }
+say() { echo "$*" >&2; }
+
+[ "$(id -u)" -eq 0 ] || die "run with sudo"
+[ $# -le 1 ] || { echo "usage: rpi-aws-kvs-setup [kvs.json]" >&2; exit 2; }
+id rpi-ex >/dev/null 2>&1 || die "user rpi-ex not found: run sbc/install.sh first"
+
+# Packages: only the missing ones, and never by upgrading installed ones.
+missing=()
+for p in "${PKGS[@]}"; do
+  dpkg-query -W -f='${db:Status-Abbrev}' "$p" 2>/dev/null | grep -q '^ii' || missing+=("$p")
+done
+if [ ${#missing[@]} -gt 0 ]; then
+  upgrades=$(apt-get -s install --no-install-recommends "${missing[@]}" | awk '/^Inst / && $3 ~ /^\[/ {print $2}')
+  [ -z "$upgrades" ] || die "installing ${missing[*]} would upgrade: $(echo "$upgrades" | xargs).
+Update the Pi first (sudo apt update && sudo apt full-upgrade, then reboot), and run this again."
+  say "installing ${missing[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${missing[@]}" >/dev/null
+fi
+
+# kvssink, built from the pinned release.
+install -d "$KVS_DIR"
+src=$KVS_DIR/sdk
+if [ -f "$src/build/libgstkvssink.so" ] && [ "$(git -C "$src" rev-parse HEAD 2>/dev/null)" = "$SDK_COMMIT" ]; then
+  say "kvssink: already built from $SDK_VERSION"
+else
+  rm -rf "$src"
+  git -c advice.detachedHead=false clone -q --depth 1 --branch "$SDK_VERSION" "$SDK_URL" "$src"
+  [ "$(git -C "$src" rev-parse HEAD)" = "$SDK_COMMIT" ] || die "$SDK_VERSION is not the commit it was when pinned"
+  # One compile job per GB of memory, so that a Zero 2 W (512 MB) builds one file at a time.
+  jobs=$(awk '/^MemTotal/ {j = int($2 / 1000000); print (j < 1 ? 1 : j)}' /proc/meminfo)
+  [ "$jobs" -le "$(nproc)" ] || jobs=$(nproc)
+  say "kvssink: building $SDK_VERSION with $jobs job(s); log in $KVS_DIR/build.log (under a minute on a Pi 5, much longer on a Zero 2 W)"
+  # _GNU_SOURCE: GCC 14 (Trixie) needs it for pthread_getname_np in the SDK's bundled C library.
+  if ! { cmake -S "$src" -B "$src/build" -DBUILD_GSTREAMER_PLUGIN=ON -DBUILD_DEPENDENCIES=OFF \
+           -DALIGNED_MEMORY_MODEL=ON -DCMAKE_C_FLAGS=-D_GNU_SOURCE \
+         && make -C "$src/build" -j"$jobs"; } > "$KVS_DIR/build.log" 2>&1; then
+    tail -20 "$KVS_DIR/build.log" >&2
+    die "kvssink build failed (log: $KVS_DIR/build.log)"
+  fi
+  say "kvssink: built"
+fi
+install -m 644 "$here/kvs_log_configuration" "$KVS_DIR/kvs_log_configuration"
+
+# The streamer, its service and its settings.
+install -m 755 "$here/rpi-aws-kvs" /usr/local/bin/rpi-aws-kvs
+install -m 644 "$here/../systemd/rpi-aws-kvs.service" /etc/systemd/system/
+[ -e "$DIR/kvs.conf" ] || install -m 644 -o root -g rpi-ex "$here/kvs.conf" "$DIR/kvs.conf"
+usermod -a -G video rpi-ex
+
+if [ $# -eq 1 ]; then
+  thing=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["thingName"])' "$1") \
+    || die "$1 is not a kvs.json from kvs-setup"
+  registered=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["thingName"])' "$DIR/config.json" \
+                 2>/dev/null) || die "$DIR/config.json is missing: register the device first (rpi-aws-keygen --install)"
+  [ "$thing" = "$registered" ] || die "$1 is for $thing, but this Pi is registered as $registered"
+  install -m 640 -o root -g rpi-ex "$1" "$DIR/kvs.json"
+  say "installed $DIR/kvs.json for $thing"
+fi
+if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
+say "Installed. Start streaming: sudo systemctl enable --now rpi-aws-kvs"

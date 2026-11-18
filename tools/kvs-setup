@@ -1,0 +1,92 @@
+#!/bin/bash
+# Let a registered thing stream video to Amazon Kinesis Video Streams (run after aws-iot-register).
+#
+#   kvs-setup rpi-ex-... [--retention-hours 24] [--region eu-west-2] [--out DIR]
+#
+# Creates, or reuses:
+#   - the video stream, named after the thing, keeping video for --retention-hours (default 24; at least 1,
+#     since playback in the console reads stored video);
+#   - the role rpi-ex-kvs, which may only describe and write to the stream named after the calling thing,
+#     and its role alias rpi-ex-kvs-alias. The device exchanges its certificate for short-lived credentials
+#     for this role through the AWS IoT credentials provider, so no AWS keys go on the device;
+#   - the policy rpi-ex-kvs (use the role alias, nothing else), attached to the thing's certificate.
+# Writes DIR/kvs.json (default ./<thing>): stream, Region, credential endpoint and role alias, for the device.
+# kvs-teardown removes all of it.
+set -euo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+usage() { sed -n '2,/^set /p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit "${1:-0}"; }
+name="" out="" retention=24
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --retention-hours) retention=$2; shift 2 ;;
+    --region) region=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    -h|--help) usage ;;
+    -*) usage 2 >&2 ;;
+    *) name=$1; shift ;;
+  esac
+done
+need
+[ -n "$name" ] || usage 2 >&2
+valid_thing "$name"
+[[ "$retention" =~ ^[1-9][0-9]*$ ]] || die "--retention-hours must be a whole number of hours, at least 1"
+out=${out:-./$name}
+mkdir -p "$out"
+aws_ iot describe-thing --thing-name "$name" >/dev/null 2>&1 || die "thing $name not found: run aws-iot-register first"
+certs=$(thing_certs "$name")
+[ -n "$certs" ] || die "thing $name has no certificate: run aws-iot-register first"
+
+# The stream. Deleting one takes about a minute, so a stream torn down just before is waited for.
+for i in $(seq 24); do
+  status=$(aws_ kinesisvideo describe-stream --stream-name "$name" --query StreamInfo.Status --output text 2>/dev/null) \
+    || status=none
+  [ "$status" = DELETING ] || break
+  [ "$i" -gt 1 ] || say "stream $name: still being deleted, waiting"
+  sleep 5
+done
+if [ "$status" = none ]; then
+  aws_ kinesisvideo create-stream --stream-name "$name" --media-type video/h264 \
+    --data-retention-in-hours "$retention" >/dev/null
+  say "stream $name: created, keeping video for $retention h"
+else
+  say "stream $name: exists"
+fi
+
+# The role and its alias, shared by all devices; each device can only use the stream named after it.
+if aws_ iam get-role --role-name "$KVS_ROLE" >/dev/null 2>&1; then
+  say "role $KVS_ROLE: exists"
+else
+  aws_ iam create-role --role-name "$KVS_ROLE" --assume-role-policy-document "$(render_policy kvs-trust.json)" \
+    --description "Kinesis Video Streams producer role (rpi-aws-examples)" >/dev/null
+  say "role $KVS_ROLE: created"
+fi
+aws_ iam put-role-policy --role-name "$KVS_ROLE" --policy-name "$KVS_ROLE-stream" \
+  --policy-document "$(render_policy kvs-role.json)"
+if aws_ iot describe-role-alias --role-alias "$KVS_ALIAS" >/dev/null 2>&1; then
+  say "role alias $KVS_ALIAS: exists"
+else
+  role_arn=$(aws_ iam get-role --role-name "$KVS_ROLE" --query Role.Arn --output text)
+  # A new role can take a few seconds to be usable.
+  for i in 1 2 3 4 5 6; do
+    aws_ iot create-role-alias --role-alias "$KVS_ALIAS" --role-arn "$role_arn" >/dev/null 2>&1 && break
+    [ "$i" -lt 6 ] || die "could not create role alias $KVS_ALIAS"
+    sleep 5
+  done
+  say "role alias $KVS_ALIAS: created"
+fi
+
+ensure_policy "$KVS_POLICY" kvs-device.json
+for arn in $certs; do
+  aws_ iot attach-policy --policy-name "$KVS_POLICY" --target "$arn"
+done
+say "policy $KVS_POLICY: attached to the thing's certificate"
+
+cred=$(aws_ iot describe-endpoint --endpoint-type iot:CredentialProvider --query endpointAddress --output text)
+cat > "$out/kvs.json" <<EOF
+{"thingName": "$name", "stream": "$name", "region": "$(current_region)",
+ "credEndpoint": "$cred", "roleAlias": "$KVS_ALIAS"}
+EOF
+say ""
+say "config: $out/kvs.json. Copy it to the device."

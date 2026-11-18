@@ -1,0 +1,32 @@
+#!/bin/bash
+# Print a URL that plays a thing's video stream live (HLS), with your AWS credentials.
+#
+#   kvs-hls-url rpi-ex-... [--expires 3600] [--region eu-west-2]
+#
+# Open it in a browser (Chrome or Safari), VLC (Media > Open Network Stream) or `ffplay URL`. It works for --expires
+# seconds (default 3600, at most 43200), and only while the device is streaming. Anyone with the URL can
+# watch until then, so treat it like a password.
+set -euo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+usage() { sed -n '2,/^set /p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit "${1:-0}"; }
+name="" expires=3600
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --expires) expires=$2; shift 2 ;;
+    --region) region=$2; shift 2 ;;
+    -h|--help) usage ;;
+    -*) usage 2 >&2 ;;
+    *) name=$1; shift ;;
+  esac
+done
+need
+[ -n "$name" ] || usage 2 >&2
+valid_thing "$name"
+
+endpoint=$(aws_ kinesisvideo get-data-endpoint --stream-name "$name" --api-name GET_HLS_STREAMING_SESSION_URL \
+  --query DataEndpoint --output text) || die "stream $name not found: run kvs-setup first"
+aws_ kinesis-video-archived-media get-hls-streaming-session-url --endpoint-url "$endpoint" \
+  --stream-name "$name" --playback-mode LIVE --expires "$expires" --query HLSStreamingSessionURL --output text \
+  || die "no live video: is rpi-aws-kvs running on the device?"

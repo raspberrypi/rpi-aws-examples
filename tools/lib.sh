@@ -11,6 +11,12 @@ GG_ROLE="${PREFIX}gg-tes"
 GG_ALIAS="${PREFIX}gg-tes-alias"
 # shellcheck disable=SC2034
 HELLO="rpi-ex.Hello"
+# shellcheck disable=SC2034
+KVS_ROLE="${PREFIX}kvs"
+# shellcheck disable=SC2034
+KVS_ALIAS="${PREFIX}kvs-alias"
+# shellcheck disable=SC2034
+KVS_POLICY="${PREFIX}kvs"
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die() { echo "error: $*" >&2; exit 1; }
