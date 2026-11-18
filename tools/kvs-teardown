@@ -1,0 +1,51 @@
+#!/bin/bash
+# Undo kvs-setup for one thing. Then run aws-iot-unregister for the thing itself.
+#
+#   kvs-teardown rpi-ex-... [--region eu-west-2]
+#
+# Deletes the thing's video stream, with all the video it holds, and detaches the rpi-ex-kvs policy from the
+# thing's certificate. When no certificate uses that policy any more, also deletes it, the role alias
+# rpi-ex-kvs-alias and the role rpi-ex-kvs. Stop rpi-aws-kvs on the device first.
+set -euo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+usage() { sed -n '2,/^set /p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit "${1:-0}"; }
+name=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --region) region=$2; shift 2 ;;
+    -h|--help) usage ;;
+    -*) usage 2 >&2 ;;
+    *) name=$1; shift ;;
+  esac
+done
+need
+[ -n "$name" ] || usage 2 >&2
+valid_thing "$name"
+
+if arn=$(aws_ kinesisvideo describe-stream --stream-name "$name" --query StreamInfo.StreamARN --output text 2>/dev/null); then
+  aws_ kinesisvideo delete-stream --stream-arn "$arn"
+  say "stream $name: deleted"
+else
+  say "stream $name: none"
+fi
+
+for arn in $(thing_certs "$name"); do
+  aws_ iot detach-policy --policy-name "$KVS_POLICY" --target "$arn" 2>/dev/null || true
+done
+delete_policy_if_unused "$KVS_POLICY"
+# Still used by another device: keep the role and its alias.
+aws_ iot get-policy --policy-name "$KVS_POLICY" >/dev/null 2>&1 && exit 0
+
+if aws_ iot describe-role-alias --role-alias "$KVS_ALIAS" >/dev/null 2>&1; then
+  aws_ iot delete-role-alias --role-alias "$KVS_ALIAS"
+  say "role alias $KVS_ALIAS: deleted"
+fi
+if aws_ iam get-role --role-name "$KVS_ROLE" >/dev/null 2>&1; then
+  for p in $(aws_ iam list-role-policies --role-name "$KVS_ROLE" --query 'PolicyNames[]' --output text); do
+    aws_ iam delete-role-policy --role-name "$KVS_ROLE" --policy-name "$p"
+  done
+  aws_ iam delete-role --role-name "$KVS_ROLE"
+  say "role $KVS_ROLE: deleted"
+fi

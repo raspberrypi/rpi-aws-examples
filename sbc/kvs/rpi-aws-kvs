@@ -1,0 +1,52 @@
+#!/bin/bash
+# Stream this Pi's camera to its Amazon Kinesis video stream, with kvssink. rpi-aws-kvs.service runs it as
+# rpi-ex; to try it by hand: sudo -u rpi-ex rpi-aws-kvs (stop the service first: one camera user at a time).
+#
+# Reads /etc/rpi-aws-examples: kvs.json from kvs-setup, device.crt from aws-iot-register, and the private key
+# that rpi-aws-keygen made (with the wrapped key store, the plain copy the key helper puts in /run at boot).
+# kvssink exchanges the certificate for short-lived AWS credentials at the AWS IoT credentials provider; the
+# server's CA comes from the system trust store. Settings come from the environment, which the service reads
+# from kvs.conf: WIDTH, HEIGHT, FRAMERATE, BITRATE_KBPS and ENCODER (auto, v4l2 or x264).
+set -euo pipefail
+
+DIR=/etc/rpi-aws-examples
+KVS_DIR=/opt/rpi-aws-examples/kvs
+CA=/etc/ssl/certs/Amazon_Root_CA_1.pem
+die() { echo "error: $*" >&2; exit 1; }
+
+width=${WIDTH:-1280} height=${HEIGHT:-720} fps=${FRAMERATE:-30} kbps=${BITRATE_KBPS:-2000}
+encoder=${ENCODER:-auto}
+
+[ -r "$DIR/kvs.json" ] || die "$DIR/kvs.json is missing: run kvs-setup on your computer, then rpi-aws-kvs-setup"
+read -r thing stream region cred alias < <(python3 -c '
+import json, sys
+c = json.load(open(sys.argv[1]))
+print(c["thingName"], c["stream"], c["region"], c["credEndpoint"], c["roleAlias"])' "$DIR/kvs.json")
+
+key=$DIR/device.key
+if [ "$(cat "$DIR/keystore" 2>/dev/null)" = wrapped ]; then
+  key=/run/rpi-aws-examples/device.key
+  [ -r "$key" ] || die "$key is missing: is rpi-aws-keyunwrap.service enabled?"
+fi
+
+# The Pi 4, CM4 and Zero 2 W have a hardware H.264 encoder (/dev/video11); the Pi 5 and CM5 do not.
+if [ "$encoder" = auto ]; then
+  encoder=x264
+  [ -e /dev/video11 ] && gst-inspect-1.0 v4l2h264enc >/dev/null 2>&1 && encoder=v4l2
+fi
+# A key frame every second: kvssink starts a fragment at each one.
+case "$encoder" in
+  v4l2) encode=("video/x-raw,width=$width,height=$height,framerate=$fps/1,format=NV12" ! v4l2convert
+                ! v4l2h264enc extra-controls="controls,repeat_sequence_header=1,video_bitrate=$((kbps * 1000)),h264_i_frame_period=$fps"
+                ! "video/x-h264,level=(string)4" ! h264parse ! "video/x-h264,stream-format=avc,alignment=au") ;;
+  x264) encode=("video/x-raw,width=$width,height=$height,framerate=$fps/1,format=I420" ! videoconvert
+                ! x264enc speed-preset=ultrafast tune=zerolatency byte-stream=true key-int-max="$fps" bframes=0 bitrate="$kbps"
+                ! h264parse ! "video/x-h264,stream-format=avc,alignment=au,profile=baseline") ;;
+  *) die "ENCODER must be auto, v4l2 or x264, not '$encoder'" ;;
+esac
+echo "streaming ${width}x${height} at $fps fps, $kbps kbit/s ($encoder) to stream $stream in $region" >&2
+
+export GST_PLUGIN_PATH=$KVS_DIR/sdk/build
+exec gst-launch-1.0 -e libcamerasrc ! "${encode[@]}" ! kvssink stream-name="$stream" aws-region="$region" \
+  iot-certificate="iot-certificate,endpoint=$cred,cert-path=$DIR/device.crt,key-path=$key,ca-path=$CA,role-aliases=$alias,iot-thing-name=$thing" \
+  framerate="$fps" storage-size=32 log-config="$KVS_DIR/kvs_log_configuration"

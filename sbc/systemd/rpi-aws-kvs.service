@@ -1,0 +1,22 @@
+[Unit]
+Description=Stream the camera to Amazon Kinesis Video Streams
+Wants=network-online.target
+After=network-online.target time-sync.target rpi-aws-keyunwrap.service
+# Not before the device has its stream (no restart loop on a new device).
+ConditionPathExists=/etc/rpi-aws-examples/kvs.json
+
+[Service]
+User=rpi-ex
+EnvironmentFile=-/etc/rpi-aws-examples/kvs.conf
+# rpi-ex has no home directory: keep GStreamer's plugin registry here, or every start rescans every plugin.
+CacheDirectory=rpi-aws-kvs
+Environment=GST_REGISTRY=%C/rpi-aws-kvs/registry.bin
+ExecStart=/usr/local/bin/rpi-aws-kvs
+# SIGINT makes gst-launch send end-of-stream, so the last fragment is sent before it exits.
+KillSignal=SIGINT
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

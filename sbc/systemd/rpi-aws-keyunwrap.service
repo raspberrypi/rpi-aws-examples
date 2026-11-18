@@ -1,7 +1,7 @@
 [Unit]
 Description=Unwrap the AWS IoT device key, and any Wi-Fi profiles, into /run (key ladder)
 ConditionPathExists=/var/lib/rpi-aws-examples/device.key.wrapped
-Before=rpi-aws-hello.service greengrass.service greengrass-lite.target iwd.service
+Before=rpi-aws-hello.service rpi-aws-kvs.service greengrass.service greengrass-lite.target iwd.service
 
 [Service]
 Type=oneshot

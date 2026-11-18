@@ -2,7 +2,7 @@
 
 > Looking for the earlier Raspberry Pi 5 example, which passes the AWS Device Advisor tests? It is still here: [Pi5AWSExample.py](Pi5AWSExample.py), with its own [README](README-Pi5AWSExample.md).
 
-These examples connect Raspberry Pi devices to [AWS IoT Core](https://aws.amazon.com/iot-core/), the AWS service that devices send messages to and receive them from. Each device publishes a message every 10 seconds, which you can watch in the AWS IoT console, and acts on messages you send to it. They cover the Raspberry Pi computers (Pi 4, Pi 5, the Compute Modules and the Zero 2 W), with or without [AWS IoT Greengrass](https://aws.amazon.com/greengrass/), and the Pico 2 W and Pico W.
+These examples connect Raspberry Pi devices to [AWS IoT Core](https://aws.amazon.com/iot-core/), the AWS service that devices send messages to and receive them from. Each device publishes a message every 10 seconds, which you can watch in the AWS IoT console, and acts on messages you send to it. They cover the Raspberry Pi computers (Pi 4, Pi 5, the Compute Modules and the Zero 2 W), with or without [AWS IoT Greengrass](https://aws.amazon.com/greengrass/), and the Pico 2 W and Pico W. A Raspberry Pi computer with a camera can also stream live video to [Amazon Kinesis Video Streams](https://aws.amazon.com/kinesis/video-streams/), using the same device identity.
 
 ## What the examples show
 
@@ -35,6 +35,8 @@ Nothing here runs a service or needs infrastructure of its own: the scripts crea
 | Raspberry Pi Zero 2 W | [sbc/](sbc/README.md) | [sbc/greengrass/](sbc/greengrass/README.md) | [sbc/greengrass/](sbc/greengrass/README.md) (512 MB: tight; Lite is the better fit) |
 | Pico 2 W, Pico W | [pico/](pico/README.md) | | |
 
+**Video.** On a Raspberry Pi computer with a camera, [sbc/kvs/](sbc/kvs/README.md) streams live video to Kinesis Video Streams, for you to watch in the AWS console. It builds on the plain client's registration, and the Pi gets short-lived AWS credentials with its certificate, so no AWS keys go on it.
+
 Raspberry Pi computers run **Raspberry Pi OS Trixie** (64-bit). Install on a running Pi (the quick start), or build an image with everything in it with [rpi-image-gen](sbc/image/README.md).
 
 **What each mode gives you.** A *plain client* is your own program with the AWS IoT Device SDK: small, and you own the connection. A *Greengrass core* runs the Greengrass nucleus, which holds the connection and deploys components to the device from the cloud. *Nucleus Lite* is the small C version for boards with little memory; *Classic* is the full Java nucleus, with the widest set of AWS components.
@@ -56,9 +58,10 @@ Scripts that write OTP are named for it (`rpi-aws-otp-init`, `pico-otp-init.py`)
 
 ```
 tools/              on your computer: aws-iot-register / -unregister, gg-core-setup / -teardown, gg-deploy-hello,
-                    aws-iot-watch.py, and the policy templates
+                    kvs-setup / -teardown, kvs-hls-url, aws-iot-watch.py, and the policy templates
 sbc/                Raspberry Pi computers: install.sh, rpi-aws-keygen, the key ladder, the hello client
 sbc/greengrass/     rpi-aws-gg-setup and the rpi-ex.Hello component (one component, both nuclei)
+sbc/kvs/            rpi-aws-kvs-setup (builds kvssink) and the rpi-aws-kvs camera streamer, for Kinesis Video Streams
 sbc/image/          rpi-image-gen layers and configs per board and mode
 pico/               hello-mqtt firmware (C, Pico SDK, coreMQTT, mbedTLS), pico-enrol.py, pico-otp-init.py
 docs/               concepts, key storage, where to keep the data, troubleshooting, further examples
@@ -74,6 +77,7 @@ Pi5AWSExample.py    the earlier Pi 5 example, which passes the AWS Device Adviso
 | Client, Nucleus Lite and Classic, each with a wrapped key and a plain file key | Compute Module 4 on the CM4 IO board | Raspberry Pi OS Lite (Trixie) from Imager, then [sbc/](sbc/README.md) and [sbc/greengrass/](sbc/greengrass/README.md); and the `cm4-client`, `cm4-greengrass-lite` and `cm4-greengrass-classic` images |
 | Client, Nucleus Lite and Classic, each with a wrapped key and a plain file key | Compute Module 5 on the CM5 IO board | Raspberry Pi OS Lite (Trixie) from Imager, booted from USB or an NVMe SSD, then [sbc/](sbc/README.md) and [sbc/greengrass/](sbc/greengrass/README.md); and the `cm5-client`, `cm5-greengrass-lite` and `cm5-greengrass-classic` images, on an NVMe SSD |
 | Client, Nucleus Lite and Classic, each with a wrapped key and a plain file key | Raspberry Pi Zero 2 W | Raspberry Pi OS Lite (Trixie) from Imager, then [sbc/](sbc/README.md) and [sbc/greengrass/](sbc/greengrass/README.md); and the `zero2w-client`, `zero2w-greengrass-lite` and `zero2w-greengrass-classic` images. With Classic, 130–200 MB of the 512 MB stay free |
+| Video to Kinesis Video Streams, plain file key, software encoder (x264) | Raspberry Pi 5 with Camera Module 3 | Raspberry Pi OS (Trixie), then [sbc/](sbc/README.md) with `install.sh --no-client` and [sbc/kvs/](sbc/kvs/README.md), in `eu-west-2`. The hardware-encoder path (Pi 4, CM4, Zero 2 W) is untested |
 | Key ladder (with a root already in OTP), and a plain key | Pico 2 W (RP2350 A2) | [pico/](pico/README.md) |
 | Plain key | Pico WH (RP2040) | [pico/](pico/README.md) |
 
